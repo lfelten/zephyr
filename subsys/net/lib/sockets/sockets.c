@@ -73,7 +73,7 @@ static inline void *get_sock_vtable(int sock,
 {
 	void *ctx;
 
-	ctx = z_get_fd_obj_and_vtable(sock,
+	ctx = zvfs_get_fd_obj_and_vtable(sock,
 				      (const struct fd_op_vtable **)vtable,
 				      lock);
 
@@ -157,7 +157,7 @@ static void zsock_flush_queue(struct net_context *ctx)
 #if defined(CONFIG_NET_NATIVE)
 static int zsock_socket_internal(int family, int type, int proto)
 {
-	int fd = z_reserve_fd();
+	int fd = zvfs_reserve_fd();
 	struct net_context *ctx;
 	int res;
 
@@ -177,7 +177,7 @@ static int zsock_socket_internal(int family, int type, int proto)
 
 	res = net_context_get(family, type, proto, &ctx);
 	if (res < 0) {
-		z_free_fd(fd);
+		zvfs_free_fd(fd);
 		errno = -res;
 		return -1;
 	}
@@ -207,7 +207,8 @@ static int zsock_socket_internal(int family, int type, int proto)
 		net_context_ref(ctx);
 	}
 
-	z_finalize_fd(fd, ctx, (const struct fd_op_vtable *)&sock_fd_op_vtable);
+	zvfs_finalize_typed_fd(fd, ctx, (const struct fd_op_vtable *)&sock_fd_op_vtable,
+			    ZVFS_MODE_IFSOCK);
 
 	NET_DBG("socket: ctx=%p, fd=%d", ctx, fd);
 
@@ -307,7 +308,7 @@ int z_impl_zsock_close(int sock)
 
 	SYS_PORT_TRACING_OBJ_FUNC_EXIT(socket, close, sock, ret < 0 ? -errno : ret);
 
-	z_free_fd(sock);
+	zvfs_free_fd(sock);
 
 	(void)sock_obj_core_dealloc(sock);
 
@@ -638,11 +639,6 @@ int zsock_accept_ctx(struct net_context *parent, struct sockaddr *addr,
 	struct net_pkt *last_pkt;
 	int fd, ret;
 
-	fd = z_reserve_fd();
-	if (fd < 0) {
-		return -1;
-	}
-
 	if (!sock_is_nonblock(parent)) {
 		k_timeout_t timeout = K_FOREVER;
 
@@ -651,7 +647,6 @@ int zsock_accept_ctx(struct net_context *parent, struct sockaddr *addr,
 		 */
 		ret = zsock_wait_data(parent, &timeout);
 		if (ret < 0) {
-			z_free_fd(fd);
 			errno = -ret;
 			return -1;
 		}
@@ -659,8 +654,14 @@ int zsock_accept_ctx(struct net_context *parent, struct sockaddr *addr,
 
 	ctx = k_fifo_get(&parent->accept_q, K_NO_WAIT);
 	if (ctx == NULL) {
-		z_free_fd(fd);
 		errno = EAGAIN;
+		return -1;
+	}
+
+	fd = zvfs_reserve_fd();
+	if (fd < 0) {
+		zsock_flush_queue(ctx);
+		net_context_put(ctx);
 		return -1;
 	}
 
@@ -669,7 +670,7 @@ int zsock_accept_ctx(struct net_context *parent, struct sockaddr *addr,
 	if (last_pkt) {
 		if (net_pkt_eof(last_pkt)) {
 			sock_set_eof(ctx);
-			z_free_fd(fd);
+			zvfs_free_fd(fd);
 			zsock_flush_queue(ctx);
 			net_context_put(ctx);
 			errno = ECONNABORTED;
@@ -679,7 +680,7 @@ int zsock_accept_ctx(struct net_context *parent, struct sockaddr *addr,
 
 	if (net_context_is_closing(ctx)) {
 		errno = ECONNABORTED;
-		z_free_fd(fd);
+		zvfs_free_fd(fd);
 		zsock_flush_queue(ctx);
 		net_context_put(ctx);
 		return -1;
@@ -700,7 +701,7 @@ int zsock_accept_ctx(struct net_context *parent, struct sockaddr *addr,
 		} else if (ctx->remote.sa_family == AF_INET6) {
 			*addrlen = sizeof(struct sockaddr_in6);
 		} else {
-			z_free_fd(fd);
+			zvfs_free_fd(fd);
 			errno = ENOTSUP;
 			zsock_flush_queue(ctx);
 			net_context_put(ctx);
@@ -710,7 +711,8 @@ int zsock_accept_ctx(struct net_context *parent, struct sockaddr *addr,
 
 	NET_DBG("accept: ctx=%p, fd=%d", ctx, fd);
 
-	z_finalize_fd(fd, ctx, (const struct fd_op_vtable *)&sock_fd_op_vtable);
+	zvfs_finalize_typed_fd(fd, ctx, (const struct fd_op_vtable *)&sock_fd_op_vtable,
+			    ZVFS_MODE_IFSOCK);
 
 	return fd;
 }
@@ -796,7 +798,7 @@ static int send_check_and_wait(struct net_context *ctx, int status,
 	}
 
 	if (status == -ENOBUFS) {
-		/* We can monitor net_pkt/net_buf avaialbility, so just wait. */
+		/* We can monitor net_pkt/net_buf availability, so just wait. */
 		k_sleep(K_MSEC(*retry_timeout));
 	}
 
@@ -1290,7 +1292,7 @@ int zsock_wait_data(struct net_context *ctx, k_timeout_t *timeout)
 
 	if (ctx->cond.lock == NULL) {
 		/* For some reason the lock pointer is not set properly
-		 * when called by fdtable.c:z_finalize_fd()
+		 * when called by fdtable.c:zvfs_finalize_fd()
 		 * It is not practical to try to figure out the fdtable
 		 * lock at this point so skip it.
 		 */
@@ -1314,7 +1316,6 @@ int zsock_wait_data(struct net_context *ctx, k_timeout_t *timeout)
 	return 0;
 }
 
-
 static int insert_pktinfo(struct msghdr *msg, int level, int type,
 			  void *pktinfo, size_t pktinfo_len)
 {
@@ -1324,7 +1325,12 @@ static int insert_pktinfo(struct msghdr *msg, int level, int type,
 		return -EINVAL;
 	}
 
-	cmsg = CMSG_FIRSTHDR(msg);
+	for (cmsg = CMSG_FIRSTHDR(msg); cmsg != NULL; cmsg = CMSG_NXTHDR(msg, cmsg)) {
+		if (cmsg->cmsg_len == 0) {
+			break;
+		}
+	}
+
 	if (cmsg == NULL) {
 		return -EINVAL;
 	}
@@ -1336,6 +1342,22 @@ static int insert_pktinfo(struct msghdr *msg, int level, int type,
 	memcpy(CMSG_DATA(cmsg), pktinfo, pktinfo_len);
 
 	return 0;
+}
+
+static int add_timestamping(struct net_context *ctx,
+			    struct net_pkt *pkt,
+			    struct msghdr *msg)
+{
+	uint8_t timestamping = 0;
+
+	net_context_get_option(ctx, NET_OPT_TIMESTAMPING, &timestamping, NULL);
+
+	if (timestamping) {
+		return insert_pktinfo(msg, SOL_SOCKET, SO_TIMESTAMPING,
+				      net_pkt_timestamp(pkt), sizeof(struct net_ptp_time));
+	}
+
+	return -ENOTSUP;
 }
 
 static int add_pktinfo(struct net_context *ctx,
@@ -1548,13 +1570,25 @@ static inline ssize_t zsock_recv_dgram(struct net_context *ctx,
 	if (msg != NULL) {
 		if (msg->msg_control != NULL) {
 			if (msg->msg_controllen > 0) {
+				bool clear_controllen = true;
+
+				if (IS_ENABLED(CONFIG_NET_CONTEXT_TIMESTAMPING)) {
+					clear_controllen = false;
+					if (add_timestamping(ctx, pkt, msg) < 0) {
+						msg->msg_flags |= ZSOCK_MSG_CTRUNC;
+					}
+				}
+
 				if (IS_ENABLED(CONFIG_NET_CONTEXT_RECV_PKTINFO) &&
 				    net_context_is_recv_pktinfo_set(ctx)) {
+					clear_controllen = false;
 					if (add_pktinfo(ctx, pkt, msg) < 0) {
 						msg->msg_flags |= ZSOCK_MSG_CTRUNC;
 					}
-				} else {
-					msg->msg_controllen = 0U;
+				}
+
+				if (clear_controllen) {
+					msg->msg_controllen = 0;
 				}
 			}
 		} else {
@@ -2109,7 +2143,7 @@ int z_impl_zsock_fcntl_impl(int sock, int cmd, int flags)
 
 	(void)k_mutex_lock(lock, K_FOREVER);
 
-	ret = z_fdtable_call_ioctl((const struct fd_op_vtable *)vtable,
+	ret = zvfs_fdtable_call_ioctl((const struct fd_op_vtable *)vtable,
 				   obj, cmd, flags);
 
 	k_mutex_unlock(lock);
@@ -2317,7 +2351,7 @@ int zsock_poll_internal(struct zsock_pollfd *fds, int nfds, k_timeout_t timeout)
 
 		(void)k_mutex_lock(lock, K_FOREVER);
 
-		result = z_fdtable_call_ioctl(vtable, ctx,
+		result = zvfs_fdtable_call_ioctl(vtable, ctx,
 					      ZFD_IOCTL_POLL_PREPARE,
 					      pfd, &pev, pev_end);
 		if (result == -EALREADY) {
@@ -2364,7 +2398,7 @@ int zsock_poll_internal(struct zsock_pollfd *fds, int nfds, k_timeout_t timeout)
 			poll_timeout = k_ticks_to_ms_floor32(timeout.ticks);
 		}
 
-		return z_fdtable_call_ioctl(offl_vtable, offl_ctx,
+		return zvfs_fdtable_call_ioctl(offl_vtable, offl_ctx,
 					    ZFD_IOCTL_POLL_OFFLOAD,
 					    fds, nfds, poll_timeout);
 	}
@@ -2405,7 +2439,7 @@ int zsock_poll_internal(struct zsock_pollfd *fds, int nfds, k_timeout_t timeout)
 
 			(void)k_mutex_lock(lock, K_FOREVER);
 
-			result = z_fdtable_call_ioctl(vtable, ctx,
+			result = zvfs_fdtable_call_ioctl(vtable, ctx,
 						      ZFD_IOCTL_POLL_UPDATE,
 						      pfd, &pev);
 			k_mutex_unlock(lock);
@@ -2677,6 +2711,22 @@ int zsock_getsockopt_ctx(struct net_context *ctx, int level, int optname,
 				ret = net_tcp_get_option(ctx,
 							 TCP_OPT_KEEPALIVE,
 							 optval, optlen);
+				if (ret < 0) {
+					errno = -ret;
+					return -1;
+				}
+
+				return 0;
+			}
+
+			break;
+
+		case SO_TIMESTAMPING:
+			if (IS_ENABLED(CONFIG_NET_CONTEXT_TIMESTAMPING)) {
+				ret = net_context_get_option(ctx,
+							     NET_OPT_TIMESTAMPING,
+							     optval, optlen);
+
 				if (ret < 0) {
 					errno = -ret;
 					return -1;
@@ -3237,6 +3287,22 @@ int zsock_setsockopt_ctx(struct net_context *ctx, int level, int optname,
 				ret = net_tcp_set_option(ctx,
 							 TCP_OPT_KEEPALIVE,
 							 optval, optlen);
+				if (ret < 0) {
+					errno = -ret;
+					return -1;
+				}
+
+				return 0;
+			}
+
+			break;
+
+		case SO_TIMESTAMPING:
+			if (IS_ENABLED(CONFIG_NET_CONTEXT_TIMESTAMPING)) {
+				ret = net_context_set_option(ctx,
+							     NET_OPT_TIMESTAMPING,
+							     optval, optlen);
+
 				if (ret < 0) {
 					errno = -ret;
 					return -1;
