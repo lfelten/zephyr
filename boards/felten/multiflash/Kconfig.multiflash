@@ -1,0 +1,4 @@
+# nRF52833 multiflash
+
+config BOARD_MULTIFLASH
+	select SOC_NRF52833_QIAA

@@ -1,0 +1,5 @@
+# nRF52833 multiflash
+
+if BOARD_MULTIFLASH
+
+endif # BOARD_MULTIFLASH

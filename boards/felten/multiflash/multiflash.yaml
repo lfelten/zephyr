@@ -1,0 +1,15 @@
+identifier: multiflash
+name: MultiFlash
+type: mcu
+arch: arm
+toolchain:
+  - zephyr
+  - gnuarmemb
+ram: 128
+testing:
+  ignore_tags:
+    - net
+supported:
+  - ble
+  - i2c
+  - gpio

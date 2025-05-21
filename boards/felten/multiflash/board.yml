@@ -1,0 +1,6 @@
+board:
+  name: multiflash
+  full_name: "multiflash"
+  vendor: felten
+  socs:
+  - name: nrf52833
