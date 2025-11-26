@@ -28,6 +28,7 @@
 		zephyr,sram = &sram0;
 		zephyr,flash = &flash0;
 		zephyr,code-partition = &slot0_partition;
+                zephyr,display = &ssd1306;
 	};
 
 	leds: leds {
@@ -118,12 +119,12 @@ stm32_lp_tick_source: &lptim1 {
 };
 
 &spi1 {
-	pinctrl-0 = <&spi1_nss_pa4 &spi1_sck_pa5
+	pinctrl-0 = <&spi1_sck_pa5
 		&spi1_miso_pa6 &spi1_mosi_pa7>;
 	pinctrl-names = "default";
 
 	status = "okay";
-	cs-gpios = <&gpioa 4 GPIO_ACTIVE_LOW>;
+	cs-gpios = <&gpioa 4 GPIO_ACTIVE_LOW>, <&gpiob 12 GPIO_ACTIVE_LOW>;
 
 	sdhc0: sdhc@0 {
 		compatible = "zephyr,sdhc-spi-slot";
@@ -136,6 +137,23 @@ stm32_lp_tick_source: &lptim1 {
 		};
 		spi-max-frequency = <24000000>;
 	};
+
+        ssd1306: ssd1306@1 {
+                compatible = "solomon,ssd1306fb";
+                reg = <1>;
+                label = "OLED_SSD1306";
+                spi-max-frequency = <8000000>;
+                width = <128>;
+                height = <64>;
+                segment-offset = <0>;
+                page-offset = <0>;
+                display-offset = <0>;
+                multiplex-ratio = <63>;
+                segment-remap;
+                com-invdir;
+                prechargep = <0xF1>;
+                data-cmd-gpios = <&gpioa 8 GPIO_ACTIVE_HIGH>;
+        };
 };
 
 &subghzspi {
@@ -145,8 +163,7 @@ stm32_lp_tick_source: &lptim1 {
 		status = "okay";
 		tx-enable-gpios = <&gpiob 2 GPIO_ACTIVE_LOW>; /* FE_CTRL1 */
 		rx-enable-gpios = <&gpiob 6 GPIO_ACTIVE_LOW>; /* FE_CTRL2 */
-		dio3-tcxo-voltage = <SX126X_DIO3_TCXO_1V7>;
-		tcxo-power-startup-delay-ms = <5>;
+
 		/* High-power output is selected as a consequence of using
 		 * tx/rx-enable-gpio to control FE_CTRL1 and FE_CTRL2. Low-power
 		 * output would require both FE_CTRL1 and FE_CTRL2 to be high,
